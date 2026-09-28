@@ -249,21 +249,34 @@ def detect_vcp(df: pd.DataFrame, timeframe: str = "weekly", ceiling_tol: float =
     return vcp
 
 
+class YahooThrottled(Exception):
+    pass
+
+
+def fetch_info(t: yf.Ticker) -> dict:
+    # When throttled, Yahoo returns a near-empty dict instead of an error.
+    info = t.info
+    if "quoteType" not in info:
+        raise YahooThrottled(t.ticker)
+    if info["quoteType"] != "EQUITY" or not info.get("marketCap"):
+        raise ValueError("not a common stock")
+    return info
+
+
 def with_backoff(fn, tries: int = 5):
-    delay = 5.0
+    delay = 10.0
     for attempt in range(tries):
         try:
             return fn()
         except Exception as e:
-            if "Rate" in type(e).__name__ or "Too Many" in str(e):
+            if attempt == tries - 1:
+                raise
+            if isinstance(e, YahooThrottled) or "Rate" in type(e).__name__ or "Too Many" in str(e):
                 log(f"    rate limited, sleeping {delay:.0f}s")
                 time.sleep(delay)
                 delay *= 2
-            elif attempt == tries - 1:
-                raise
             else:
                 time.sleep(1)
-    return None
 
 
 def trend_slope(values: list[float]) -> float:
@@ -327,7 +340,7 @@ def fetch_fundamentals(ticker: str, prices: pd.DataFrame, use_cache: bool = True
         return json.loads(path.read_text())
 
     t = yf.Ticker(ticker)
-    info = with_backoff(lambda: t.info) or {}
+    info = with_backoff(lambda: fetch_info(t))
     data = {k: info.get(k) for k in (
         "shortName", "sector", "industry", "marketCap", "operatingCashflow",
         "fullTimeEmployees", "heldPercentInsiders")}
@@ -440,7 +453,7 @@ def main() -> None:
             fundamentals.append({"ticker": ticker, **check_fundamentals(f, args)})
         except Exception as e:
             log(f"    failed: {e}")
-        time.sleep(0.3)
+        time.sleep(1)
 
     fund = pd.DataFrame(fundamentals) if fundamentals else pd.DataFrame(columns=["ticker"])
     out = shortlist.merge(fund, on="ticker", how="left")
